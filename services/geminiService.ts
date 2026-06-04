@@ -1,6 +1,5 @@
 /// <reference types="vite/client" />
 import { GoogleGenAI, Type } from "@google/genai";
-import Groq from "groq-sdk";
 import { SYSTEM_PROMPT } from "../constants";
 import {
   BriefingData,
@@ -11,54 +10,40 @@ import {
 } from "../types";
 
 // ─────────────────────────────────────────────
-// CLIENT INITIALIZATION (GROQ & GEMINI)
+// CLIENT INITIALIZATION (GEMINI UNIQUEMENT)
 // ─────────────────────────────────────────────
 
-let geminiAi: GoogleGenAI;
-let groqClient: Groq;
+let ai: GoogleGenAI;
 
-function getGeminiClient(): GoogleGenAI {
-  if (!geminiAi) {
+function getClient(): GoogleGenAI {
+  if (!ai) {
     const apiKey = import.meta.env.VITE_API_KEY;
     if (!apiKey) {
-      console.warn(
-        "VITE_API_KEY (Gemini) est introuvable. La génération d'images échouera.",
-      );
+      throw new Error("La variable VITE_API_KEY est introuvable.");
     }
-    geminiAi = new GoogleGenAI({ apiKey: apiKey || "" });
+    ai = new GoogleGenAI({ apiKey: apiKey });
   }
-  return geminiAi;
-}
-
-function getGroqClient(): Groq {
-  if (!groqClient) {
-    const apiKey = import.meta.env.VITE_GROQ_API_KEY;
-    if (!apiKey) {
-      throw new Error(
-        "La variable VITE_GROQ_API_KEY est introuvable. Vérifiez votre fichier .env ou Netlify.",
-      );
-    }
-    // dangerouslyAllowBrowser est requis pour utiliser Groq côté client (Vite/React)
-    groqClient = new Groq({ apiKey, dangerouslyAllowBrowser: true });
-  }
-  return groqClient;
+  return ai;
 }
 
 // ─────────────────────────────────────────────
-// RATE LIMITER
+// RATE LIMITER ULTRA-SÉCURISÉ (Contre l'erreur 429)
 // ─────────────────────────────────────────────
 
 class SmartRateLimiter {
-  private queue: Array<() => Promise<unknown>> = [];
+  private queue: Array<() => Promise<any>> = [];
   private isProcessing = false;
-  // Intervalle réduit car Groq est plus permissif, mais on garde une sécurité
-  private readonly minIntervalMs = 1000;
+
+  // 4500ms = 4.5 secondes.
+  // 60 / 4.5 = 13 requêtes/minute (Le maximum autorisé par le Free Tier est de 20)
+  private minIntervalMs = 4500;
 
   enqueue<T>(task: () => Promise<T>): Promise<T> {
     return new Promise((resolve, reject) => {
       this.queue.push(async () => {
         try {
-          resolve(await task());
+          const result = await task();
+          resolve(result);
         } catch (error) {
           reject(error);
         }
@@ -67,7 +52,7 @@ class SmartRateLimiter {
     });
   }
 
-  private async processQueue(): Promise<void> {
+  private async processQueue() {
     if (this.isProcessing) return;
     this.isProcessing = true;
 
@@ -76,10 +61,11 @@ class SmartRateLimiter {
       if (task) {
         try {
           await task();
-        } catch {
-          // Each task handles its own error via the enqueue wrapper
+        } catch (e) {
+          console.error("Task failed in queue", e);
         }
-        await new Promise((r) => setTimeout(r, this.minIntervalMs));
+        // Attente forcée avant de lancer la prochaine requête
+        await new Promise((resolve) => setTimeout(resolve, this.minIntervalMs));
       }
     }
 
@@ -90,41 +76,18 @@ class SmartRateLimiter {
 const apiLimiter = new SmartRateLimiter();
 
 // ─────────────────────────────────────────────
-// GROQ GENERATOR HELPER
-// Utilise LLaMA 3 via Groq pour générer du JSON strict
+// UTILS : EXTRACTEUR JSON ROBUSTE
 // ─────────────────────────────────────────────
 
-async function groqGenerate<T>(
-  prompt: string,
-  schema: object,
-  systemInstruction?: string,
-): Promise<T> {
-  const client = getGroqClient();
-  const sysMsg =
-    systemInstruction || SYSTEM_PROMPT || "Tu es un expert stratégique FOCP.";
-
-  // Injection du schéma dans le prompt pour forcer la structure
-  const fullPrompt = `${prompt}\n\nIMPORTANT : Tu dois impérativement répondre UNIQUEMENT par un objet JSON valide. La structure de ton JSON doit strictement correspondre au schéma suivant :\n${JSON.stringify(schema)}`;
-
-  const response = await client.chat.completions.create({
-    model: "llama-3.3-70b-versatile", // Modèle ultra-rapide et intelligent
-    messages: [
-      { role: "system", content: sysMsg },
-      { role: "user", content: fullPrompt },
-    ],
-    response_format: { type: "json_object" }, // Force Groq à renvoyer un JSON parsable
-    temperature: 0.2, // Température basse pour la stabilité des données
-  });
-
-  const jsonText = response.choices[0]?.message?.content || "{}";
-
-  try {
-    return JSON.parse(jsonText) as T;
-  } catch (e) {
-    console.error("[groqGenerate] JSON parse error:", e, "\nRaw:", jsonText);
-    throw new Error("Invalid JSON response from Groq AI.");
+const extractCleanJson = (text: string): string => {
+  // Cette fonction va chercher le JSON même si l'IA écrit du texte avant ou après
+  // Match JSON enclosed in triple backticks (```json ... ```) or plain JSON
+  const match = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (match) {
+    return match[1].trim();
   }
-}
+  return text.trim();
+};
 
 // ─────────────────────────────────────────────
 // COMMON SCHEMAS
@@ -135,18 +98,10 @@ const articleReferenceSchema = {
   properties: {
     title: { type: Type.STRING },
     source: { type: Type.STRING },
-    url: {
-      type: Type.STRING,
-      description:
-        "URL complète et directe de l'article source, pas la page d'accueil.",
-    },
+    url: { type: Type.STRING, description: "URL directe" },
   },
   required: ["title", "source", "url"],
 };
-
-// ─────────────────────────────────────────────
-// BRIEFING SCHEMAS
-// ─────────────────────────────────────────────
 
 const briefingPointSchema = {
   type: Type.OBJECT,
@@ -154,11 +109,7 @@ const briefingPointSchema = {
     subTitle: { type: Type.STRING },
     details: { type: Type.STRING },
     references: { type: Type.ARRAY, items: articleReferenceSchema },
-    verificationNeeded: {
-      type: Type.STRING,
-      description:
-        "Points nécessitant une vérification croisée ou basés sur une source unique/moins fiable.",
-    },
+    verificationNeeded: { type: Type.STRING },
   },
   required: ["subTitle", "details", "references"],
 };
@@ -177,25 +128,12 @@ const commodityPriceSchema = {
   properties: {
     name: { type: Type.STRING },
     price: { type: Type.STRING },
-    unit: {
-      type: Type.STRING,
-      description: "Unité de mesure (ex: $/tonne, c/bu).",
-    },
+    unit: { type: Type.STRING },
     change: { type: Type.STRING },
-    lastYearPrice: {
-      type: Type.STRING,
-      description: "Prix il y a un an (N-1).",
-    },
-    evolution: {
-      type: Type.STRING,
-      description: "Évolution sur un an (ex: +12%).",
-    },
+    lastYearPrice: { type: Type.STRING },
+    evolution: { type: Type.STRING },
     trend: { type: Type.STRING, enum: ["up", "down", "stable"] },
-    analysis: {
-      type: Type.STRING,
-      description:
-        "Variation récente, facteurs explicatifs et corrélation avec le marché agricole.",
-    },
+    analysis: { type: Type.STRING },
   },
   required: [
     "name",
@@ -234,18 +172,11 @@ const annualEventSchema = {
   type: Type.OBJECT,
   properties: {
     name: { type: Type.STRING },
-    dateRange: {
-      type: Type.STRING,
-      description: "Date précise ou mois (ex: '12-15 Novembre 2024')",
-    },
+    dateRange: { type: Type.STRING },
     location: { type: Type.STRING },
-    theme: {
-      type: Type.STRING,
-      description:
-        "Thématique principale : Agriculture, Sol, Climat, Mangrove, Fertilisation, Afrique, Eau, Biodiversité.",
-    },
+    theme: { type: Type.STRING },
     description: { type: Type.STRING },
-    url: { type: Type.STRING, description: "Site officiel de l'événement." },
+    url: { type: Type.STRING },
   },
   required: ["name", "dateRange", "location", "theme", "description"],
 };
@@ -267,11 +198,7 @@ const videoOfTheDaySchema = {
     title: { type: Type.STRING },
     commentary: { type: Type.STRING },
     reference: articleReferenceSchema,
-    posterImagePrompt: {
-      type: Type.STRING,
-      description:
-        "Prompt détaillé pour générer une image d'affiche cinématique représentant le sujet de la vidéo.",
-    },
+    posterImagePrompt: { type: Type.STRING },
   },
   required: [
     "videoUrl",
@@ -304,11 +231,7 @@ const globalSouthTrendSchema = {
             ],
           },
           title: { type: Type.STRING },
-          points: {
-            type: Type.ARRAY,
-            items: { type: Type.STRING },
-            description: "Liste de points clés clairs et concis.",
-          },
+          points: { type: Type.ARRAY, items: { type: Type.STRING } },
           reference: articleReferenceSchema,
         },
         required: ["category", "title", "points", "reference"],
@@ -538,161 +461,7 @@ const briefingDataCoreSchema = {
   ],
 };
 
-// ─────────────────────────────────────────────
-// REFRESH SECTION SCHEMAS
-// ─────────────────────────────────────────────
-
-type RefreshSectionKey =
-  | "softPowerInfluence"
-  | "strategicMoves"
-  | "strategicMoves-OCP"
-  | "strategicMoves-International"
-  | "internationalEvents"
-  | "annualStrategicEvents";
-
-const refreshSectionConfig: Record<
-  RefreshSectionKey,
-  { searchPrompt: string; schema: object }
-> = {
-  softPowerInfluence: {
-    searchPrompt: `Agis en tant qu'analyste. Génère des informations stratégiques structurées sur des personnalités africaines ou du Sud Global exerçant une influence majeure.`,
-    schema: softPowerInfluenceSchema,
-  },
-  strategicMoves: {
-    searchPrompt: `Génère des données structurées sur les récentes nominations C-Suite (PDG, DG, Directeurs) dans le secteur des engrais et de l'agro-industrie mondiale.`,
-    schema: { type: Type.ARRAY, items: strategicMoveSchema },
-  },
-  "strategicMoves-OCP": {
-    searchPrompt: `Génère des données structurées sur les récentes nominations C-Suite au sein du Groupe OCP et de son écosystème (UM6P, filiales).`,
-    schema: { type: Type.ARRAY, items: strategicMoveSchema },
-  },
-  "strategicMoves-International": {
-    searchPrompt: `Génère des données structurées sur les récentes nominations C-Suite chez les principaux concurrents internationaux du Groupe OCP (Mosaic, Nutrien, Yara, etc.).`,
-    schema: { type: Type.ARRAY, items: strategicMoveSchema },
-  },
-  internationalEvents: {
-    searchPrompt: `Dresse la liste structurée des conférences et sommets internationaux imminents liés à l'agriculture, aux engrais et à l'Afrique.`,
-    schema: { type: Type.ARRAY, items: internationalEventSchema },
-  },
-  annualStrategicEvents: {
-    searchPrompt: `Dresse la liste structurée des grands événements stratégiques annuels majeurs dans les domaines de l'agriculture et de la biodiversité.`,
-    schema: { type: Type.ARRAY, items: annualEventSchema },
-  },
-};
-
-// ─────────────────────────────────────────────
-// EXPORTED FUNCTIONS
-// ─────────────────────────────────────────────
-
-export const refreshBriefingSection = async (
-  sectionKey: RefreshSectionKey,
-): Promise<unknown> => {
-  return apiLimiter.enqueue(async () => {
-    const config = refreshSectionConfig[sectionKey];
-    if (!config) throw new Error(`Unknown section key: ${sectionKey}`);
-
-    return groqGenerate(config.searchPrompt, config.schema);
-  });
-};
-
-export const generateDashboardCore = async (
-  date: Date,
-): Promise<Partial<BriefingData>> => {
-  const formattedDate = date.toLocaleDateString("fr-FR", {
-    weekday: "long",
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-  });
-
-  const prompt = `Génère une analyse de veille stratégique complète pour la date du ${formattedDate}.
-  Couvre les prix des matières premières, les actualités du Groupe OCP, des concurrents internationaux, et les événements géopolitiques majeurs.`;
-
-  return groqGenerate<Partial<BriefingData>>(prompt, briefingDataCoreSchema);
-};
-
-export const generateBriefingSection = async (
-  sectionType: string,
-): Promise<BriefingSection> => {
-  return apiLimiter.enqueue(async () => {
-    const prompt = `Génère le contenu analytique détaillé pour la thématique de briefing suivante : "${sectionType}".`;
-    return groqGenerate<BriefingSection>(prompt, briefingSectionSchema);
-  });
-};
-
-/**
- * Generate an image from a text prompt via Gemini image generation.
- * (Groq does not support image generation, so we keep Gemini just for this)
- */
-export const generateImageFromPrompt = async (
-  prompt: string,
-): Promise<string> => {
-  return apiLimiter.enqueue(async () => {
-    const client = getGeminiClient();
-
-    const response = await client.models.generateContent({
-      model: "gemini-2.5-flash-image",
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
-      config: {
-        // @ts-ignore: imageConfig not yet in official types
-        imageConfig: { aspectRatio: "16:9" },
-      },
-    });
-
-    const parts = response.candidates?.[0]?.content?.parts ?? [];
-    for (const part of parts) {
-      if (part.inlineData?.data) {
-        return `data:image/png;base64,${part.inlineData.data}`;
-      }
-    }
-
-    throw new Error("No image was generated.");
-  });
-};
-
-// ─────────────────────────────────────────────
-// AFRICAN HERITAGE EXPANSION
-// ─────────────────────────────────────────────
-
-const bookRecommendationSchema = {
-  type: Type.OBJECT,
-  properties: {
-    title: { type: Type.STRING },
-    author: { type: Type.STRING },
-  },
-  required: ["title", "author"],
-};
-
-const expandedHeritageInfoSchema = {
-  type: Type.OBJECT,
-  properties: {
-    detailedDescription: { type: Type.STRING },
-    bookRecommendations: {
-      type: Type.ARRAY,
-      items: bookRecommendationSchema,
-    },
-  },
-  required: ["detailedDescription", "bookRecommendations"],
-};
-
-export const expandHeritageInfo = async (
-  title: string,
-  description: string,
-): Promise<ExpandedHeritageInfo> => {
-  return apiLimiter.enqueue(async () => {
-    const prompt = `Développe les informations historiques sur le sujet suivant du patrimoine africain : "${title}". Description initiale : "${description}".`;
-    return groqGenerate<ExpandedHeritageInfo>(
-      prompt,
-      expandedHeritageInfoSchema,
-    );
-  });
-};
-
-// ─────────────────────────────────────────────
-// COUNTRY FOCUS
-// ─────────────────────────────────────────────
-
-const countryFocusDataSchema = {
+export const countryFocusDataSchema = {
   type: Type.OBJECT,
   properties: {
     countryName: { type: Type.STRING },
@@ -914,11 +683,239 @@ const countryFocusDataSchema = {
   ],
 };
 
+// ─────────────────────────────────────────────
+// EXPORTED API FUNCTIONS
+// ─────────────────────────────────────────────
+
+export const generateDashboardCore = async (
+  date: Date,
+): Promise<Partial<BriefingData>> => {
+  const ai = getClient();
+  const formattedDate = date.toLocaleDateString("fr-FR", {
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  });
+
+  const prompt = `Génère les données principales du tableau de bord pour la date : ${formattedDate}.
+  IMPORTANT : Tu DOIS faire des recherches sur internet pour avoir les informations exactes, réelles et les plus récentes (surtout pour les actualités OCP, concurrents et prix matières premières).
+  RÈGLE ABSOLUE DE FORMATAGE : Tu dois répondre UNIQUEMENT par un objet JSON valide qui respecte scrupuleusement la structure suivante. Ne rajoute aucun texte ni balise autour.
+  Structure attendue : ${JSON.stringify(briefingDataCoreSchema)}`;
+
+  const response = await ai.models.generateContent({
+    model: "gemini-2.5-flash",
+    contents: [{ role: "user", parts: [{ text: prompt }] }],
+    config: {
+      systemInstruction: SYSTEM_PROMPT,
+      tools: [{ googleSearch: {} }],
+    },
+  });
+
+  const jsonText = extractCleanJson(response.text || "");
+
+  try {
+    const data = JSON.parse(jsonText);
+    const groundingChunks = (response.candidates?.[0] as any)?.groundingMetadata
+      ?.groundingChunks;
+    const sources: GroundingSource[] = [];
+    if (groundingChunks) {
+      for (const chunk of groundingChunks) {
+        if (chunk.web)
+          sources.push({ url: chunk.web.uri, title: chunk.web.title });
+      }
+    }
+    return { ...data, groundingSources: sources };
+  } catch (e) {
+    console.error("Failed to parse core briefing JSON:", e);
+    throw new Error("Invalid JSON response from AI for core briefing.");
+  }
+};
+
+export const generateBriefingSection = async (
+  sectionType: string,
+): Promise<BriefingSection> => {
+  return apiLimiter.enqueue(async () => {
+    const ai = getClient();
+    const prompt = `Génère UNIQUEMENT la section de briefing détaillée pour "${sectionType}".
+    IMPORTANT : Fais des recherches sur internet pour sourcer tes informations avec des faits réels. Réponds UNIQUEMENT par un objet JSON valide respectant cette structure exacte, sans aucun texte autour :
+    ${JSON.stringify(briefingSectionSchema)}`;
+
+    const response = await ai.models.generateContent({
+      model: "gemini-2.5-flash",
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      config: {
+        systemInstruction: SYSTEM_PROMPT,
+        tools: [{ googleSearch: {} }],
+      },
+    });
+
+    const jsonText = extractCleanJson(response.text || "");
+    try {
+      return JSON.parse(jsonText);
+    } catch (e) {
+      console.error(`Failed to parse section JSON for ${sectionType}:`, e);
+      throw new Error(
+        `Invalid JSON response from AI for section ${sectionType}.`,
+      );
+    }
+  });
+};
+
+export const refreshBriefingSection = async (
+  sectionKey:
+    | "softPowerInfluence"
+    | "strategicMoves"
+    | "strategicMoves-OCP"
+    | "strategicMoves-International"
+    | "internationalEvents"
+    | "annualStrategicEvents",
+): Promise<any> => {
+  return apiLimiter.enqueue(async () => {
+    const ai = getClient();
+    let basePrompt = "";
+    let schema = null;
+
+    if (sectionKey === "softPowerInfluence") {
+      basePrompt = `Génère une NOUVELLE proposition pour la section "Influence & Soft Power".`;
+      schema = softPowerInfluenceSchema;
+    } else if (sectionKey === "strategicMoves") {
+      basePrompt = `Génère une NOUVELLE liste de "Mouvements Stratégiques" (Nominations C-Suite).`;
+      schema = { type: Type.ARRAY, items: strategicMoveSchema };
+    } else if (sectionKey === "strategicMoves-OCP") {
+      basePrompt = `Génère une NOUVELLE liste de "Mouvements Stratégiques" UNIQUEMENT pour l'Écosystème OCP.`;
+      schema = { type: Type.ARRAY, items: strategicMoveSchema };
+    } else if (sectionKey === "strategicMoves-International") {
+      basePrompt = `Génère une NOUVELLE liste de "Mouvements Stratégiques" UNIQUEMENT pour les concurrents internationaux.`;
+      schema = { type: Type.ARRAY, items: strategicMoveSchema };
+    } else if (sectionKey === "internationalEvents") {
+      basePrompt = `Génère une NOUVELLE liste d'événements internationaux pour les semaines à venir.`;
+      schema = { type: Type.ARRAY, items: internationalEventSchema };
+    } else if (sectionKey === "annualStrategicEvents") {
+      basePrompt = `Génère une NOUVELLE liste d'événements stratégiques majeurs pour l'année.`;
+      schema = { type: Type.ARRAY, items: annualEventSchema };
+    }
+
+    const prompt = `${basePrompt} \n\nIMPORTANT : Tu DOIS utiliser l'outil de recherche Google pour trouver de vraies informations d'actualité. RÈGLE ABSOLUE : Réponds UNIQUEMENT par un objet JSON valide, sans texte autour, suivant ce schéma : ${JSON.stringify(schema)}`;
+
+    const response = await ai.models.generateContent({
+      model: "gemini-2.5-flash",
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      config: {
+        systemInstruction: SYSTEM_PROMPT,
+        tools: [{ googleSearch: {} }],
+      },
+    });
+
+    const jsonText = extractCleanJson(response.text || "");
+    try {
+      return JSON.parse(jsonText);
+    } catch (e) {
+      console.error(`Failed to parse refresh JSON for ${sectionKey}:`, e);
+      throw new Error(`Invalid JSON response from AI for ${sectionKey}.`);
+    }
+  });
+};
+
 export const generateCountryFocus = async (
   countryName: string,
 ): Promise<CountryFocusData> => {
   return apiLimiter.enqueue(async () => {
-    const prompt = `Génère une fiche pays détaillée pour : ${countryName}, couvrant les indicateurs agricoles, politiques et économiques.`;
-    return groqGenerate<CountryFocusData>(prompt, countryFocusDataSchema);
+    const ai = getClient();
+    const prompt = `Génère une FICHE PAYS détaillée pour : ${countryName}.
+    IMPORTANT : Utilise internet pour trouver les chiffres exacts et réels. RÈGLE ABSOLUE : Réponds UNIQUEMENT par un objet JSON valide sans texte autour, selon ce schéma :
+    ${JSON.stringify(countryFocusDataSchema)}`;
+
+    const response = await ai.models.generateContent({
+      model: "gemini-2.5-flash",
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      config: {
+        systemInstruction: SYSTEM_PROMPT,
+        tools: [{ googleSearch: {} }],
+      },
+    });
+
+    const jsonText = extractCleanJson(response.text || "");
+    try {
+      return JSON.parse(jsonText);
+    } catch (e) {
+      console.error(
+        `Failed to parse country focus JSON for ${countryName}:`,
+        e,
+      );
+      throw new Error(
+        `Invalid JSON response from AI for country focus: ${countryName}.`,
+      );
+    }
+  });
+};
+
+export const generateImageFromPrompt = async (
+  prompt: string,
+): Promise<string> => {
+  return apiLimiter.enqueue(async () => {
+    const ai = getClient();
+    const response = await ai.models.generateContent({
+      model: "gemini-2.5-flash-image",
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      config: {
+        // @ts-ignore
+        imageConfig: { aspectRatio: "16:9" },
+      },
+    });
+
+    const parts = response.candidates?.[0]?.content?.parts || [];
+    for (const part of parts) {
+      if (part.inlineData && part.inlineData.data) {
+        return `data:image/png;base64,${part.inlineData.data}`;
+      }
+    }
+    throw new Error("No image was generated.");
+  });
+};
+
+export const expandHeritageInfo = async (
+  title: string,
+  description: string,
+): Promise<ExpandedHeritageInfo> => {
+  return apiLimiter.enqueue(async () => {
+    const ai = getClient();
+    const prompt = `Développe les informations sur le sujet suivant : "${title}", dont la description initiale est : "${description}".
+    RÈGLE ABSOLUE : Réponds UNIQUEMENT au format JSON valide selon la structure indiquée.`;
+
+    const response = await ai.models.generateContent({
+      model: "gemini-2.5-flash",
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      config: {
+        // Pour les informations historiques générales, la recherche Google n'est pas vitale, on peut forcer le JSON
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            detailedDescription: { type: Type.STRING },
+            bookRecommendations: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  title: { type: Type.STRING },
+                  author: { type: Type.STRING },
+                },
+                required: ["title", "author"],
+              },
+            },
+          },
+          required: ["detailedDescription", "bookRecommendations"],
+        },
+      },
+    });
+
+    const jsonText = extractCleanJson(response.text || "");
+    try {
+      return JSON.parse(jsonText);
+    } catch (e) {
+      console.error("Failed to parse expanded heritage info JSON:", e);
+      throw new Error("Invalid JSON response from AI for heritage info.");
+    }
   });
 };
