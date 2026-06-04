@@ -1,5 +1,6 @@
 /// <reference types="vite/client" />
 import { GoogleGenAI, Type } from "@google/genai";
+import Groq from "groq-sdk";
 import { SYSTEM_PROMPT } from "../constants";
 import {
   BriefingData,
@@ -10,22 +11,33 @@ import {
 } from "../types";
 
 // ─────────────────────────────────────────────
-// CLIENT INITIALIZATION
+// CLIENT INITIALIZATION (GROQ & GEMINI)
 // ─────────────────────────────────────────────
 
-let ai: GoogleGenAI;
+let geminiAi: GoogleGenAI;
+let groqClient: Groq;
 
-function getClient(): GoogleGenAI {
-  if (!ai) {
+function getGeminiClient(): GoogleGenAI {
+  if (!geminiAi) {
     const apiKey = import.meta.env.VITE_API_KEY;
     if (!apiKey) {
-      throw new Error(
-        "La variable VITE_API_KEY est introuvable. Vérifiez votre fichier .env ou les variables Netlify.",
-      );
+      console.warn("VITE_API_KEY (Gemini) est introuvable. La génération d'images échouera.");
     }
-    ai = new GoogleGenAI({ apiKey });
+    geminiAi = new GoogleGenAI({ apiKey: apiKey || "" });
   }
-  return ai;
+  return geminiAi;
+}
+
+function getGroqClient(): Groq {
+  if (!groqClient) {
+    const apiKey = import.meta.env.VITE_GROQ_API_KEY;
+    if (!apiKey) {
+      throw new Error("La variable VITE_GROQ_API_KEY est introuvable. Vérifiez votre fichier .env ou Netlify.");
+    }
+    // dangerouslyAllowBrowser est requis pour utiliser Groq côté client (Vite/React)
+    groqClient = new Groq({ apiKey, dangerouslyAllowBrowser: true });
+  }
+  return groqClient;
 }
 
 // ─────────────────────────────────────────────
@@ -35,7 +47,8 @@ function getClient(): GoogleGenAI {
 class SmartRateLimiter {
   private queue: Array<() => Promise<unknown>> = [];
   private isProcessing = false;
-  private readonly minIntervalMs = 4500;
+  // Intervalle réduit car Groq est plus permissif, mais on garde une sécurité
+  private readonly minIntervalMs = 1000;
 
   enqueue<T>(task: () => Promise<T>): Promise<T> {
     return new Promise((resolve, reject) => {
@@ -73,55 +86,38 @@ class SmartRateLimiter {
 const apiLimiter = new SmartRateLimiter();
 
 // ─────────────────────────────────────────────
-// TWO-STEP HELPER
-// Gemini does NOT allow googleSearch + responseMimeType: "application/json"
-// simultaneously. We solve this with two sequential calls:
-//   1. Search call  → grounding + raw text (no JSON constraint)
-//   2. Struct call  → parse raw text into strict JSON schema (no tools)
+// GROQ GENERATOR HELPER
+// Utilise LLaMA 3 via Groq pour générer du JSON strict
 // ─────────────────────────────────────────────
 
-async function twoStepGenerate<T>(
-  searchPrompt: string,
-  structPrompt: (rawText: string) => string,
+async function groqGenerate<T>(
+  prompt: string,
   schema: object,
   systemInstruction?: string,
 ): Promise<T> {
-  const client = getClient();
+  const client = getGroqClient();
+  const sysMsg = systemInstruction || SYSTEM_PROMPT || "Tu es un expert stratégique FOCP.";
 
-  // ── Step 1: grounded search (no JSON mode) ──────────────────────────────
-  const searchResponse = await client.models.generateContent({
-    model: "gemini-2.5-flash",
-    contents: [{ role: "user", parts: [{ text: searchPrompt }] }],
-    config: {
-      ...(systemInstruction ? { systemInstruction } : {}),
-      tools: [{ googleSearch: {} }],
-    },
-  });
+  // Injection du schéma dans le prompt pour forcer la structure
+  const fullPrompt = `${prompt}\n\nIMPORTANT : Tu dois impérativement répondre UNIQUEMENT par un objet JSON valide. La structure de ton JSON doit strictement correspondre au schéma suivant :\n${JSON.stringify(schema)}`;
 
-  const rawText = (searchResponse.text ?? "").trim();
-
-  // ── Step 2: structured output (no tools) ────────────────────────────────
-  const structResponse = await client.models.generateContent({
-    model: "gemini-2.5-flash",
-    contents: [
-      {
-        role: "user",
-        parts: [{ text: structPrompt(rawText) }],
-      },
+  const response = await client.chat.completions.create({
+    model: "llama3-70b-8192", // Modèle ultra-rapide et intelligent
+    messages: [
+      { role: "system", content: sysMsg },
+      { role: "user", content: fullPrompt }
     ],
-    config: {
-      responseMimeType: "application/json",
-      responseSchema: schema,
-    },
+    response_format: { type: "json_object" }, // Force Groq à renvoyer un JSON parsable
+    temperature: 0.2, // Température basse pour la stabilité des données
   });
 
-  const jsonText = (structResponse.text ?? "").trim();
+  const jsonText = response.choices[0]?.message?.content || "{}";
 
   try {
     return JSON.parse(jsonText) as T;
   } catch (e) {
-    console.error("[twoStepGenerate] JSON parse error:", e, "\nRaw:", jsonText);
-    throw new Error("Invalid JSON response from AI.");
+    console.error("[groqGenerate] JSON parse error:", e, "\nRaw:", jsonText);
+    throw new Error("Invalid JSON response from Groq AI.");
   }
 }
 
@@ -136,8 +132,7 @@ const articleReferenceSchema = {
     source: { type: Type.STRING },
     url: {
       type: Type.STRING,
-      description:
-        "URL complète et directe de l'article source, pas la page d'accueil.",
+      description: "URL complète et directe de l'article source, pas la page d'accueil.",
     },
   },
   required: ["title", "source", "url"],
@@ -155,8 +150,7 @@ const briefingPointSchema = {
     references: { type: Type.ARRAY, items: articleReferenceSchema },
     verificationNeeded: {
       type: Type.STRING,
-      description:
-        "Points nécessitant une vérification croisée ou basés sur une source unique/moins fiable.",
+      description: "Points nécessitant une vérification croisée ou basés sur une source unique/moins fiable.",
     },
   },
   required: ["subTitle", "details", "references"],
@@ -183,8 +177,7 @@ const commodityPriceSchema = {
     trend: { type: Type.STRING, enum: ["up", "down", "stable"] },
     analysis: {
       type: Type.STRING,
-      description:
-        "Variation récente, facteurs explicatifs et corrélation avec le marché agricole.",
+      description: "Variation récente, facteurs explicatifs et corrélation avec le marché agricole.",
     },
   },
   required: ["name", "price", "unit", "change", "lastYearPrice", "evolution", "trend"],
@@ -223,8 +216,7 @@ const annualEventSchema = {
     location: { type: Type.STRING },
     theme: {
       type: Type.STRING,
-      description:
-        "Thématique principale : Agriculture, Sol, Climat, Mangrove, Fertilisation, Afrique, Eau, Biodiversité.",
+      description: "Thématique principale : Agriculture, Sol, Climat, Mangrove, Fertilisation, Afrique, Eau, Biodiversité.",
     },
     description: { type: Type.STRING },
     url: { type: Type.STRING, description: "Site officiel de l'événement." },
@@ -251,8 +243,7 @@ const videoOfTheDaySchema = {
     reference: articleReferenceSchema,
     posterImagePrompt: {
       type: Type.STRING,
-      description:
-        "Prompt détaillé pour générer une image d'affiche cinématique représentant le sujet de la vidéo.",
+      description: "Prompt détaillé pour générer une image d'affiche cinématique représentant le sujet de la vidéo.",
     },
   },
   required: ["videoUrl", "title", "commentary", "reference", "posterImagePrompt"],
@@ -485,40 +476,27 @@ const refreshSectionConfig: Record<
   { searchPrompt: string; schema: object }
 > = {
   softPowerInfluence: {
-    searchPrompt: `Recherche les dernières actualités sur des personnalités africaines ou du Sud Global
-      qui exercent une influence remarquable dans des domaines comme la culture, la diplomatie,
-      la technologie, l'agriculture ou l'économie. Inclus leur nom, pays, domaine d'influence,
-      et les raisons pour lesquelles ils sont en tendance.`,
+    searchPrompt: `Agis en tant qu'analyste. Génère des informations stratégiques structurées sur des personnalités africaines ou du Sud Global exerçant une influence majeure.`,
     schema: softPowerInfluenceSchema,
   },
   strategicMoves: {
-    searchPrompt: `Recherche les toutes dernières nominations C-Suite (PDG, DG, Directeurs) dans
-      le secteur des engrais, de l'agriculture et de l'agro-industrie à l'échelle mondiale.
-      Inclus le nom, la société, le pays, la date de nomination et le parcours de la personne.`,
+    searchPrompt: `Génère des données structurées sur les récentes nominations C-Suite (PDG, DG, Directeurs) dans le secteur des engrais et de l'agro-industrie mondiale.`,
     schema: { type: Type.ARRAY, items: strategicMoveSchema },
   },
   "strategicMoves-OCP": {
-    searchPrompt: `Recherche les toutes dernières nominations C-Suite au sein du Groupe OCP et de
-      son écosystème (OCP SA, UM6P, filiales, partenariats). Inclus le nom, la société, le pays,
-      la date de nomination et le parcours de la personne.`,
+    searchPrompt: `Génère des données structurées sur les récentes nominations C-Suite au sein du Groupe OCP et de son écosystème (UM6P, filiales).`,
     schema: { type: Type.ARRAY, items: strategicMoveSchema },
   },
   "strategicMoves-International": {
-    searchPrompt: `Recherche les toutes dernières nominations C-Suite chez les principaux concurrents
-      internationaux du Groupe OCP : Mosaic, Nutrien, Yara, PhosAgro, ICL, CF Industries, etc.
-      Inclus le nom, la société, le pays, la date de nomination et le parcours de la personne.`,
+    searchPrompt: `Génère des données structurées sur les récentes nominations C-Suite chez les principaux concurrents internationaux du Groupe OCP (Mosaic, Nutrien, Yara, etc.).`,
     schema: { type: Type.ARRAY, items: strategicMoveSchema },
   },
   internationalEvents: {
-    searchPrompt: `Recherche les conférences, sommets et événements internationaux à venir cette semaine
-      ou dans les prochaines semaines, liés à l'agriculture, aux engrais, au développement durable,
-      à la sécurité alimentaire et à l'Afrique. Inclus le nom, la date, le lieu et une description.`,
+    searchPrompt: `Dresse la liste structurée des conférences et sommets internationaux imminents liés à l'agriculture, aux engrais et à l'Afrique.`,
     schema: { type: Type.ARRAY, items: internationalEventSchema },
   },
   annualStrategicEvents: {
-    searchPrompt: `Recherche les grands événements stratégiques annuels de l'année en cours ou de l'année
-      prochaine dans les domaines : Agriculture, Sol, Climat, Mangrove, Fertilisation, Afrique, Eau,
-      Biodiversité. Inclus le nom, les dates, le lieu, la thématique et le site officiel.`,
+    searchPrompt: `Dresse la liste structurée des grands événements stratégiques annuels majeurs dans les domaines de l'agriculture et de la biodiversité.`,
     schema: { type: Type.ARRAY, items: annualEventSchema },
   },
 };
@@ -527,9 +505,6 @@ const refreshSectionConfig: Record<
 // EXPORTED FUNCTIONS
 // ─────────────────────────────────────────────
 
-/**
- * Refresh a specific briefing section using the two-step pattern.
- */
 export const refreshBriefingSection = async (
   sectionKey: RefreshSectionKey,
 ): Promise<unknown> => {
@@ -537,21 +512,10 @@ export const refreshBriefingSection = async (
     const config = refreshSectionConfig[sectionKey];
     if (!config) throw new Error(`Unknown section key: ${sectionKey}`);
 
-    return twoStepGenerate(
-      config.searchPrompt,
-      (raw) =>
-        `Sur la base des informations suivantes récupérées en temps réel :\n\n${raw}\n\n` +
-        `Structure ces données selon le schéma JSON demandé. ` +
-        `Ne génère que des données bien sourcées et vérifiables.`,
-      config.schema,
-      SYSTEM_PROMPT,
-    );
+    return groqGenerate(config.searchPrompt, config.schema);
   });
 };
 
-/**
- * Generate the full dashboard core data using the two-step pattern.
- */
 export const generateDashboardCore = async (
   date: Date,
 ): Promise<Partial<BriefingData>> => {
@@ -562,64 +526,31 @@ export const generateDashboardCore = async (
     day: "numeric",
   });
 
-  const searchPrompt =
-    `Effectue une veille complète et à jour pour la date du ${formattedDate}. ` +
-    `Couvre les sujets suivants : ` +
-    `(1) Alertes et risques majeurs pour le secteur agricole et des engrais, ` +
-    `(2) Prix des matières premières agricoles (blé, maïs, soja, phosphate, urée, DAP, MOP, soufre, ammoniaque), ` +
-    `(3) Actualités du Groupe OCP (chiffres clés, contrats, projets), ` +
-    `(4) Actualités des concurrents internationaux (Mosaic, Nutrien, Yara, PhosAgro, ICL), ` +
-    `(5) Événements géopolitiques et tendances du Sud Global impactant l'agriculture, ` +
-    `(6) Signaux faibles et tendances émergentes, ` +
-    `(7) Personnalités africaines en vue (soft power), ` +
-    `(8) Patrimoine africain à mettre en lumière, ` +
-    `(9) Image et vidéo du jour liées à l'agriculture ou à l'Afrique.`;
+  const prompt = `Génère une analyse de veille stratégique complète pour la date du ${formattedDate}.
+  Couvre les prix des matières premières, les actualités du Groupe OCP, des concurrents internationaux, et les événements géopolitiques majeurs.`;
 
-  const data = await twoStepGenerate<Partial<BriefingData>>(
-    searchPrompt,
-    (raw) =>
-      `${SYSTEM_PROMPT}\n\n` +
-      `Sur la base des informations de veille suivantes récupérées en temps réel :\n\n${raw}\n\n` +
-      `Génère le tableau de bord complet au format JSON pour la date du ${formattedDate}. ` +
-      `Assure-toi que toutes les données sont bien sourcées et correspondent à la date indiquée.`,
-    briefingDataCoreSchema,
+  return groqGenerate<Partial<BriefingData>>(
+    prompt,
+    briefingDataCoreSchema
   );
-
-  return data;
 };
 
-/**
- * Generate a single detailed briefing section using the two-step pattern.
- */
 export const generateBriefingSection = async (
   sectionType: string,
 ): Promise<BriefingSection> => {
   return apiLimiter.enqueue(async () => {
-    const searchPrompt =
-      `Effectue une recherche approfondie et à jour sur le sujet suivant pour un briefing stratégique : ` +
-      `"${sectionType}". ` +
-      `Trouve des informations récentes, bien sourcées, avec des faits vérifiables, ` +
-      `des chiffres clés et des références d'articles.`;
-
-    return twoStepGenerate<BriefingSection>(
-      searchPrompt,
-      (raw) =>
-        `${SYSTEM_PROMPT}\n\n` +
-        `Sur la base des informations suivantes récupérées en temps réel :\n\n${raw}\n\n` +
-        `Structure ces données en une section de briefing détaillée pour "${sectionType}". ` +
-        `Fournis le titre de la section et un contenu clair, sourcé et structuré.`,
-      briefingSectionSchema,
-    );
+    const prompt = `Génère le contenu analytique détaillé pour la thématique de briefing suivante : "${sectionType}".`;
+    return groqGenerate<BriefingSection>(prompt, briefingSectionSchema);
   });
 };
 
 /**
  * Generate an image from a text prompt via Gemini image generation.
- * Note: image generation does not support grounding — single call only.
+ * (Groq does not support image generation, so we keep Gemini just for this)
  */
 export const generateImageFromPrompt = async (prompt: string): Promise<string> => {
   return apiLimiter.enqueue(async () => {
-    const client = getClient();
+    const client = getGeminiClient();
 
     const response = await client.models.generateContent({
       model: "gemini-2.5-flash-image",
@@ -666,39 +597,13 @@ const expandedHeritageInfoSchema = {
   required: ["detailedDescription", "bookRecommendations"],
 };
 
-/**
- * Expand a heritage entry with deeper context and book recommendations.
- * Uses a single structured call (no grounding needed — context provided inline).
- */
 export const expandHeritageInfo = async (
   title: string,
   description: string,
 ): Promise<ExpandedHeritageInfo> => {
   return apiLimiter.enqueue(async () => {
-    const client = getClient();
-
-    const prompt =
-      `Développe les informations sur le sujet du patrimoine africain suivant.\n\n` +
-      `Titre : "${title}"\n` +
-      `Description initiale : "${description}"\n\n` +
-      `Fournis une description détaillée et enrichie, ainsi que des recommandations de livres.`;
-
-    const response = await client.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: expandedHeritageInfoSchema,
-      },
-    });
-
-    const jsonText = (response.text ?? "").trim();
-    try {
-      return JSON.parse(jsonText) as ExpandedHeritageInfo;
-    } catch (e) {
-      console.error("[expandHeritageInfo] JSON parse error:", e);
-      throw new Error("Invalid JSON response from AI for heritage info.");
-    }
+    const prompt = `Développe les informations historiques sur le sujet suivant du patrimoine africain : "${title}". Description initiale : "${description}".`;
+    return groqGenerate<ExpandedHeritageInfo>(prompt, expandedHeritageInfoSchema);
   });
 };
 
@@ -878,26 +783,11 @@ const countryFocusDataSchema = {
   ],
 };
 
-/**
- * Generate a full country focus report using the two-step pattern.
- */
 export const generateCountryFocus = async (
   countryName: string,
 ): Promise<CountryFocusData> => {
   return apiLimiter.enqueue(async () => {
-    const searchPrompt =
-      `Effectue une veille complète sur ${countryName} pour produire une fiche pays stratégique (FOCP). ` +
-      `Couvre : identité du pays, profil agricole, marché des engrais, politique agricole, ` +
-      `climat et environnement, sécurité et géopolitique, gouvernance agricole (ministres), ` +
-      `calendrier politique, indicateurs FOCP et actualités récentes.`;
-
-    return twoStepGenerate<CountryFocusData>(
-      searchPrompt,
-      (raw) =>
-        `Sur la base des informations de veille suivantes pour ${countryName} :\n\n${raw}\n\n` +
-        `Génère la fiche pays FOCP complète et structurée au format JSON. ` +
-        `Assure-toi que toutes les données sont précises, récentes et bien sourcées.`,
-      countryFocusDataSchema,
-    );
+    const prompt = `Génère une fiche pays détaillée pour : ${countryName}, couvrant les indicateurs agricoles, politiques et économiques.`;
+    return groqGenerate<CountryFocusData>(prompt, countryFocusDataSchema);
   });
 };
