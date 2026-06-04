@@ -10,7 +10,7 @@ import {
 } from "../types";
 
 // ─────────────────────────────────────────────
-// CLIENT INITIALIZATION (GEMINI UNIQUEMENT)
+// CLIENT INITIALIZATION (GEMINI)
 // ─────────────────────────────────────────────
 
 let ai: GoogleGenAI;
@@ -27,16 +27,16 @@ function getClient(): GoogleGenAI {
 }
 
 // ─────────────────────────────────────────────
-// RATE LIMITER ULTRA-SÉCURISÉ (Contre l'erreur 429)
+// RATE LIMITER ULTRA-SÉCURISÉ
 // ─────────────────────────────────────────────
 
 class SmartRateLimiter {
   private queue: Array<() => Promise<any>> = [];
   private isProcessing = false;
 
-  // 4500ms = 4.5 secondes.
-  // 60 / 4.5 = 13 requêtes/minute (Le maximum autorisé par le Free Tier est de 20)
-  private minIntervalMs = 4500;
+  // FREIN MAJEUR : 8000ms = 8 secondes entre chaque requête.
+  // Cela garantit un maximum de 7.5 requêtes par minute (loin de la limite de 20).
+  private minIntervalMs = 8000;
 
   enqueue<T>(task: () => Promise<T>): Promise<T> {
     return new Promise((resolve, reject) => {
@@ -80,12 +80,8 @@ const apiLimiter = new SmartRateLimiter();
 // ─────────────────────────────────────────────
 
 const extractCleanJson = (text: string): string => {
-  // Cette fonction va chercher le JSON même si l'IA écrit du texte avant ou après
-  // Match JSON enclosed in triple backticks (```json ... ```) or plain JSON
   const match = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
-  if (match) {
-    return match[1].trim();
-  }
+  if (match) return match[1].trim();
   return text.trim();
 };
 
@@ -684,52 +680,55 @@ export const countryFocusDataSchema = {
 };
 
 // ─────────────────────────────────────────────
-// EXPORTED API FUNCTIONS
+// EXPORTED API FUNCTIONS (TOUTES DANS LA FILE D'ATTENTE)
 // ─────────────────────────────────────────────
 
 export const generateDashboardCore = async (
   date: Date,
 ): Promise<Partial<BriefingData>> => {
-  const ai = getClient();
-  const formattedDate = date.toLocaleDateString("fr-FR", {
-    weekday: "long",
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-  });
+  // L'appel principal fait maintenant la queue comme le reste pour éviter le blocage initial
+  return apiLimiter.enqueue(async () => {
+    const ai = getClient();
+    const formattedDate = date.toLocaleDateString("fr-FR", {
+      weekday: "long",
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+    });
 
-  const prompt = `Génère les données principales du tableau de bord pour la date : ${formattedDate}.
-  IMPORTANT : Tu DOIS faire des recherches sur internet pour avoir les informations exactes, réelles et les plus récentes (surtout pour les actualités OCP, concurrents et prix matières premières).
-  RÈGLE ABSOLUE DE FORMATAGE : Tu dois répondre UNIQUEMENT par un objet JSON valide qui respecte scrupuleusement la structure suivante. Ne rajoute aucun texte ni balise autour.
-  Structure attendue : ${JSON.stringify(briefingDataCoreSchema)}`;
+    const prompt = `Génère les données principales du tableau de bord pour la date : ${formattedDate}.
+    IMPORTANT : Tu DOIS faire des recherches sur internet pour avoir les informations exactes, réelles et les plus récentes (surtout pour les actualités OCP, concurrents et prix matières premières).
+    RÈGLE ABSOLUE DE FORMATAGE : Tu dois répondre UNIQUEMENT par un objet JSON valide qui respecte scrupuleusement la structure suivante. Ne rajoute aucun texte ni balise autour.
+    Structure attendue : ${JSON.stringify(briefingDataCoreSchema)}`;
 
-  const response = await ai.models.generateContent({
-    model: "gemini-2.5-flash",
-    contents: [{ role: "user", parts: [{ text: prompt }] }],
-    config: {
-      systemInstruction: SYSTEM_PROMPT,
-      tools: [{ googleSearch: {} }],
-    },
-  });
+    const response = await ai.models.generateContent({
+      model: "gemini-2.5-flash",
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      config: {
+        systemInstruction: SYSTEM_PROMPT,
+        tools: [{ googleSearch: {} }],
+      },
+    });
 
-  const jsonText = extractCleanJson(response.text || "");
+    const jsonText = extractCleanJson(response.text || "");
 
-  try {
-    const data = JSON.parse(jsonText);
-    const groundingChunks = (response.candidates?.[0] as any)?.groundingMetadata
-      ?.groundingChunks;
-    const sources: GroundingSource[] = [];
-    if (groundingChunks) {
-      for (const chunk of groundingChunks) {
-        if (chunk.web)
-          sources.push({ url: chunk.web.uri, title: chunk.web.title });
+    try {
+      const data = JSON.parse(jsonText);
+      const groundingChunks = (response.candidates?.[0] as any)
+        ?.groundingMetadata?.groundingChunks;
+      const sources: GroundingSource[] = [];
+      if (groundingChunks) {
+        for (const chunk of groundingChunks) {
+          if (chunk.web)
+            sources.push({ url: chunk.web.uri, title: chunk.web.title });
+        }
       }
+      return { ...data, groundingSources: sources };
+    } catch (e) {
+      console.error("Failed to parse core briefing JSON:", e);
+      throw new Error("Invalid JSON response from AI for core briefing.");
     }
-    return { ...data, groundingSources: sources };
-  } catch (e) {
-    console.error("Failed to parse core briefing JSON:", e);
-    throw new Error("Invalid JSON response from AI for core briefing.");
-  }
+  });
 };
 
 export const generateBriefingSection = async (
@@ -887,7 +886,6 @@ export const expandHeritageInfo = async (
       model: "gemini-2.5-flash",
       contents: [{ role: "user", parts: [{ text: prompt }] }],
       config: {
-        // Pour les informations historiques générales, la recherche Google n'est pas vitale, on peut forcer le JSON
         responseMimeType: "application/json",
         responseSchema: {
           type: Type.OBJECT,
