@@ -21,7 +21,9 @@ function getGeminiClient(): GoogleGenAI {
   if (!geminiAi) {
     const apiKey = import.meta.env.VITE_API_KEY;
     if (!apiKey) {
-      console.warn("VITE_API_KEY (Gemini) est introuvable. La génération d'images échouera.");
+      console.warn(
+        "VITE_API_KEY (Gemini) est introuvable. La génération d'images échouera.",
+      );
     }
     geminiAi = new GoogleGenAI({ apiKey: apiKey || "" });
   }
@@ -32,7 +34,9 @@ function getGroqClient(): Groq {
   if (!groqClient) {
     const apiKey = import.meta.env.VITE_GROQ_API_KEY;
     if (!apiKey) {
-      throw new Error("La variable VITE_GROQ_API_KEY est introuvable. Vérifiez votre fichier .env ou Netlify.");
+      throw new Error(
+        "La variable VITE_GROQ_API_KEY est introuvable. Vérifiez votre fichier .env ou Netlify.",
+      );
     }
     // dangerouslyAllowBrowser est requis pour utiliser Groq côté client (Vite/React)
     groqClient = new Groq({ apiKey, dangerouslyAllowBrowser: true });
@@ -96,16 +100,17 @@ async function groqGenerate<T>(
   systemInstruction?: string,
 ): Promise<T> {
   const client = getGroqClient();
-  const sysMsg = systemInstruction || SYSTEM_PROMPT || "Tu es un expert stratégique FOCP.";
+  const sysMsg =
+    systemInstruction || SYSTEM_PROMPT || "Tu es un expert stratégique FOCP.";
 
   // Injection du schéma dans le prompt pour forcer la structure
   const fullPrompt = `${prompt}\n\nIMPORTANT : Tu dois impérativement répondre UNIQUEMENT par un objet JSON valide. La structure de ton JSON doit strictement correspondre au schéma suivant :\n${JSON.stringify(schema)}`;
 
   const response = await client.chat.completions.create({
-    model: "llama3-70b-8192", // Modèle ultra-rapide et intelligent
+    model: "llama-3.3-70b-versatile", // Modèle ultra-rapide et intelligent
     messages: [
       { role: "system", content: sysMsg },
-      { role: "user", content: fullPrompt }
+      { role: "user", content: fullPrompt },
     ],
     response_format: { type: "json_object" }, // Force Groq à renvoyer un JSON parsable
     temperature: 0.2, // Température basse pour la stabilité des données
@@ -132,7 +137,8 @@ const articleReferenceSchema = {
     source: { type: Type.STRING },
     url: {
       type: Type.STRING,
-      description: "URL complète et directe de l'article source, pas la page d'accueil.",
+      description:
+        "URL complète et directe de l'article source, pas la page d'accueil.",
     },
   },
   required: ["title", "source", "url"],
@@ -150,7 +156,8 @@ const briefingPointSchema = {
     references: { type: Type.ARRAY, items: articleReferenceSchema },
     verificationNeeded: {
       type: Type.STRING,
-      description: "Points nécessitant une vérification croisée ou basés sur une source unique/moins fiable.",
+      description:
+        "Points nécessitant une vérification croisée ou basés sur une source unique/moins fiable.",
     },
   },
   required: ["subTitle", "details", "references"],
@@ -170,17 +177,35 @@ const commodityPriceSchema = {
   properties: {
     name: { type: Type.STRING },
     price: { type: Type.STRING },
-    unit: { type: Type.STRING, description: "Unité de mesure (ex: $/tonne, c/bu)." },
+    unit: {
+      type: Type.STRING,
+      description: "Unité de mesure (ex: $/tonne, c/bu).",
+    },
     change: { type: Type.STRING },
-    lastYearPrice: { type: Type.STRING, description: "Prix il y a un an (N-1)." },
-    evolution: { type: Type.STRING, description: "Évolution sur un an (ex: +12%)." },
+    lastYearPrice: {
+      type: Type.STRING,
+      description: "Prix il y a un an (N-1).",
+    },
+    evolution: {
+      type: Type.STRING,
+      description: "Évolution sur un an (ex: +12%).",
+    },
     trend: { type: Type.STRING, enum: ["up", "down", "stable"] },
     analysis: {
       type: Type.STRING,
-      description: "Variation récente, facteurs explicatifs et corrélation avec le marché agricole.",
+      description:
+        "Variation récente, facteurs explicatifs et corrélation avec le marché agricole.",
     },
   },
-  required: ["name", "price", "unit", "change", "lastYearPrice", "evolution", "trend"],
+  required: [
+    "name",
+    "price",
+    "unit",
+    "change",
+    "lastYearPrice",
+    "evolution",
+    "trend",
+  ],
 };
 
 const highlightSchema = {
@@ -216,7 +241,8 @@ const annualEventSchema = {
     location: { type: Type.STRING },
     theme: {
       type: Type.STRING,
-      description: "Thématique principale : Agriculture, Sol, Climat, Mangrove, Fertilisation, Afrique, Eau, Biodiversité.",
+      description:
+        "Thématique principale : Agriculture, Sol, Climat, Mangrove, Fertilisation, Afrique, Eau, Biodiversité.",
     },
     description: { type: Type.STRING },
     url: { type: Type.STRING, description: "Site officiel de l'événement." },
@@ -243,10 +269,17 @@ const videoOfTheDaySchema = {
     reference: articleReferenceSchema,
     posterImagePrompt: {
       type: Type.STRING,
-      description: "Prompt détaillé pour générer une image d'affiche cinématique représentant le sujet de la vidéo.",
+      description:
+        "Prompt détaillé pour générer une image d'affiche cinématique représentant le sujet de la vidéo.",
     },
   },
-  required: ["videoUrl", "title", "commentary", "reference", "posterImagePrompt"],
+  required: [
+    "videoUrl",
+    "title",
+    "commentary",
+    "reference",
+    "posterImagePrompt",
+  ],
 };
 
 const globalSouthTrendSchema = {
@@ -261,7 +294,14 @@ const globalSouthTrendSchema = {
         properties: {
           category: {
             type: Type.STRING,
-            enum: ["Politique", "Économie", "Social", "Technologie", "Environnement", "Autre"],
+            enum: [
+              "Politique",
+              "Économie",
+              "Social",
+              "Technologie",
+              "Environnement",
+              "Autre",
+            ],
           },
           title: { type: Type.STRING },
           points: {
@@ -304,8 +344,14 @@ const softPowerInfluenceSchema = {
     ocpLink: { type: Type.STRING },
   },
   required: [
-    "name", "field", "country", "presentation",
-    "impact", "reasonForTrending", "imageUrl", "reference",
+    "name",
+    "field",
+    "country",
+    "presentation",
+    "impact",
+    "reasonForTrending",
+    "imageUrl",
+    "reference",
   ],
 };
 
@@ -323,8 +369,13 @@ const strategicMoveSchema = {
     reference: articleReferenceSchema,
   },
   required: [
-    "personName", "newRole", "company", "country",
-    "appointmentDate", "background", "reference",
+    "personName",
+    "newRole",
+    "company",
+    "country",
+    "appointmentDate",
+    "background",
+    "reference",
   ],
 };
 
@@ -337,7 +388,13 @@ const weakSignalSchema = {
     confidenceLevel: { type: Type.STRING, enum: ["low", "medium", "high"] },
     reference: articleReferenceSchema,
   },
-  required: ["signal", "potentialImpact", "timescale", "confidenceLevel", "reference"],
+  required: [
+    "signal",
+    "potentialImpact",
+    "timescale",
+    "confidenceLevel",
+    "reference",
+  ],
 };
 
 const ocpNewsItemSchema = {
@@ -394,8 +451,12 @@ const ocpKeyFiguresSchema = {
     },
   },
   required: [
-    "turnover", "ebitda", "investment",
-    "employees", "productionCapacity", "confirmedNews",
+    "turnover",
+    "ebitda",
+    "investment",
+    "employees",
+    "productionCapacity",
+    "confirmedNews",
   ],
 };
 
@@ -411,8 +472,12 @@ const competitorNewsSchema = {
     reference: articleReferenceSchema,
   },
   required: [
-    "companyName", "headquarters", "newsTitle",
-    "newsSummary", "strategicImpact", "reference",
+    "companyName",
+    "headquarters",
+    "newsTitle",
+    "newsSummary",
+    "strategicImpact",
+    "reference",
   ],
 };
 
@@ -452,10 +517,24 @@ const briefingDataCoreSchema = {
     competitorNews: { type: Type.ARRAY, items: competitorNewsSchema },
   },
   required: [
-    "date", "alerts", "commodityPrices", "marketAnalysis", "ocpKeyFigures",
-    "highlights", "strategicArticle", "internationalEvents", "annualStrategicEvents",
-    "imageOfTheDay", "videoOfTheDay", "globalSouthTrends", "africanHeritage",
-    "softPowerInfluence", "strategicMoves", "weakSignals", "ocpGroupNews", "competitorNews",
+    "date",
+    "alerts",
+    "commodityPrices",
+    "marketAnalysis",
+    "ocpKeyFigures",
+    "highlights",
+    "strategicArticle",
+    "internationalEvents",
+    "annualStrategicEvents",
+    "imageOfTheDay",
+    "videoOfTheDay",
+    "globalSouthTrends",
+    "africanHeritage",
+    "softPowerInfluence",
+    "strategicMoves",
+    "weakSignals",
+    "ocpGroupNews",
+    "competitorNews",
   ],
 };
 
@@ -529,10 +608,7 @@ export const generateDashboardCore = async (
   const prompt = `Génère une analyse de veille stratégique complète pour la date du ${formattedDate}.
   Couvre les prix des matières premières, les actualités du Groupe OCP, des concurrents internationaux, et les événements géopolitiques majeurs.`;
 
-  return groqGenerate<Partial<BriefingData>>(
-    prompt,
-    briefingDataCoreSchema
-  );
+  return groqGenerate<Partial<BriefingData>>(prompt, briefingDataCoreSchema);
 };
 
 export const generateBriefingSection = async (
@@ -548,7 +624,9 @@ export const generateBriefingSection = async (
  * Generate an image from a text prompt via Gemini image generation.
  * (Groq does not support image generation, so we keep Gemini just for this)
  */
-export const generateImageFromPrompt = async (prompt: string): Promise<string> => {
+export const generateImageFromPrompt = async (
+  prompt: string,
+): Promise<string> => {
   return apiLimiter.enqueue(async () => {
     const client = getGeminiClient();
 
@@ -603,7 +681,10 @@ export const expandHeritageInfo = async (
 ): Promise<ExpandedHeritageInfo> => {
   return apiLimiter.enqueue(async () => {
     const prompt = `Développe les informations historiques sur le sujet suivant du patrimoine africain : "${title}". Description initiale : "${description}".`;
-    return groqGenerate<ExpandedHeritageInfo>(prompt, expandedHeritageInfoSchema);
+    return groqGenerate<ExpandedHeritageInfo>(
+      prompt,
+      expandedHeritageInfoSchema,
+    );
   });
 };
 
@@ -632,9 +713,17 @@ const countryFocusDataSchema = {
         corruptionIndex: { type: Type.STRING },
       },
       required: [
-        "officialName", "capital", "region", "population", "gdp",
-        "agGdpPercent", "officialLanguages", "currency", "politicalRegime",
-        "politicalStabilityIndex", "corruptionIndex",
+        "officialName",
+        "capital",
+        "region",
+        "population",
+        "gdp",
+        "agGdpPercent",
+        "officialLanguages",
+        "currency",
+        "politicalRegime",
+        "politicalStabilityIndex",
+        "corruptionIndex",
       ],
     },
     agriculturalProfile: {
@@ -650,8 +739,14 @@ const countryFocusDataSchema = {
         climateVulnerability: { type: Type.STRING },
       },
       required: [
-        "activePopulationInAg", "ruralPopulation", "mainCrops", "arableLand",
-        "irrigationLevel", "mechanizationLevel", "foodImportDependency", "climateVulnerability",
+        "activePopulationInAg",
+        "ruralPopulation",
+        "mainCrops",
+        "arableLand",
+        "irrigationLevel",
+        "mechanizationLevel",
+        "foodImportDependency",
+        "climateVulnerability",
       ],
     },
     fertilizerMarket: {
@@ -667,8 +762,14 @@ const countryFocusDataSchema = {
         ocpPresence: { type: Type.STRING },
       },
       required: [
-        "annualConsumption", "imports", "localProduction", "subsidies",
-        "dominantPlayers", "priceSensitivity", "recentTrend", "ocpPresence",
+        "annualConsumption",
+        "imports",
+        "localProduction",
+        "subsidies",
+        "dominantPlayers",
+        "priceSensitivity",
+        "recentTrend",
+        "ocpPresence",
       ],
     },
     agriculturalPolicy: {
@@ -683,8 +784,13 @@ const countryFocusDataSchema = {
         tradeOrientation: { type: Type.STRING },
       },
       required: [
-        "strategyName", "launchYear", "objectives", "recentReforms",
-        "subsidiesPrograms", "accessToFinance", "tradeOrientation",
+        "strategyName",
+        "launchYear",
+        "objectives",
+        "recentReforms",
+        "subsidiesPrograms",
+        "accessToFinance",
+        "tradeOrientation",
       ],
     },
     climateAndEnv: {
@@ -698,8 +804,12 @@ const countryFocusDataSchema = {
         agImpact: { type: Type.STRING },
       },
       required: [
-        "dominantClimate", "rainfallTrend", "waterStress",
-        "droughtRisk", "recentExtremeEvents", "agImpact",
+        "dominantClimate",
+        "rainfallTrend",
+        "waterStress",
+        "droughtRisk",
+        "recentExtremeEvents",
+        "agImpact",
       ],
     },
     securityAndGeopolitics: {
@@ -712,8 +822,11 @@ const countryFocusDataSchema = {
         regionalPosition: { type: Type.STRING },
       },
       required: [
-        "stabilityLevel", "conflicts", "logisticsRisks",
-        "energyDependency", "regionalPosition",
+        "stabilityLevel",
+        "conflicts",
+        "logisticsRisks",
+        "energyDependency",
+        "regionalPosition",
       ],
     },
     agriculturalGovernance: {
@@ -748,7 +861,12 @@ const countryFocusDataSchema = {
         recentElections: { type: Type.STRING },
         impactOnAg: { type: Type.STRING },
       },
-      required: ["nextElection", "localElections", "recentElections", "impactOnAg"],
+      required: [
+        "nextElection",
+        "localElections",
+        "recentElections",
+        "impactOnAg",
+      ],
     },
     focpIndicators: {
       type: Type.OBJECT,
@@ -760,8 +878,11 @@ const countryFocusDataSchema = {
         coopOpportunities: { type: Type.STRING },
       },
       required: [
-        "importDependency", "growthPotential", "climateRisk",
-        "fertilizerSensitivity", "coopOpportunities",
+        "importDependency",
+        "growthPotential",
+        "climateRisk",
+        "fertilizerSensitivity",
+        "coopOpportunities",
       ],
     },
     executiveSummary: {
@@ -777,9 +898,19 @@ const countryFocusDataSchema = {
     latestNews: { type: Type.ARRAY, items: articleReferenceSchema },
   },
   required: [
-    "countryName", "flagUrl", "identity", "agriculturalProfile", "fertilizerMarket",
-    "agriculturalPolicy", "climateAndEnv", "securityAndGeopolitics", "agriculturalGovernance",
-    "politicalCalendar", "focpIndicators", "executiveSummary", "latestNews",
+    "countryName",
+    "flagUrl",
+    "identity",
+    "agriculturalProfile",
+    "fertilizerMarket",
+    "agriculturalPolicy",
+    "climateAndEnv",
+    "securityAndGeopolitics",
+    "agriculturalGovernance",
+    "politicalCalendar",
+    "focpIndicators",
+    "executiveSummary",
+    "latestNews",
   ],
 };
 
