@@ -35,7 +35,7 @@ function getClient(): GoogleGenAI {
 class SmartRateLimiter {
   private queue: Array<() => Promise<unknown>> = [];
   private isProcessing = false;
-  private readonly minIntervalMs = 2500;
+  private readonly minIntervalMs = 4500;
 
   enqueue<T>(task: () => Promise<T>): Promise<T> {
     return new Promise((resolve, reject) => {
